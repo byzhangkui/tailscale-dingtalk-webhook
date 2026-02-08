@@ -22,10 +22,6 @@ def _get_headers(event):
 
 
 def _get_body(event):
-    if isinstance(event, (bytes, bytearray)):
-        return event.decode("utf-8")
-    if isinstance(event, str):
-        return event
     if isinstance(event, dict):
         body = event.get("body")
         if body is None:
@@ -35,22 +31,86 @@ def _get_body(event):
         if isinstance(body, (bytes, bytearray)):
             return body.decode("utf-8")
         return str(body)
+    if isinstance(event, (bytes, bytearray)):
+        return event.decode("utf-8")
+    if isinstance(event, str):
+        return event
     return ""
+
+
+def _normalize_event(event):
+    if isinstance(event, (bytes, bytearray)):
+        event_text = event.decode("utf-8")
+    elif isinstance(event, str):
+        event_text = event
+    else:
+        event_text = None
+
+    if event_text:
+        try:
+            parsed = json.loads(event_text)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    return event
+
+
+def _parse_tailscale_signature_header(header_value):
+    if not header_value:
+        return None, None
+
+    timestamp = None
+    signatures = {}
+    pairs = header_value.split(",")
+    for pair in pairs:
+        parts = pair.split("=", 1)
+        if len(parts) != 2:
+            return None, None
+        key, value = parts[0].strip(), parts[1].strip()
+        if key == "t":
+            try:
+                timestamp = int(value)
+            except ValueError:
+                return None, None
+        elif key == "v1":
+            signatures.setdefault("v1", []).append(value)
+        else:
+            continue
+
+    if not signatures:
+        return None, None
+    return timestamp, signatures
 
 
 def _verify_tailscale_signature(secret, body, headers):
     if not secret:
         logger.warning("TAILSCALE_WEBHOOK_SECRET is not set; skipping signature verification")
         return True
-    signature = headers.get("x-tailscale-signature", "")
-    if not signature.startswith("sha256="):
-        logger.warning("Missing or invalid X-Tailscale-Signature header")
+
+    header_value = headers.get("tailscale-webhook-signature", "")
+    timestamp, signatures = _parse_tailscale_signature_header(header_value)
+    if not timestamp or not signatures:
+        logger.warning("Missing or invalid Tailscale-Webhook-Signature header")
         return False
-    expected = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256)
-    valid = hmac.compare_digest(signature, f"sha256={expected.hexdigest()}")
-    if not valid:
-        logger.warning("Tailscale signature verification failed")
-    return valid
+
+    if time.time() - timestamp > 300:
+        logger.warning("Tailscale signature timestamp is too old")
+        return False
+
+    message = f"{timestamp}.{body}".encode("utf-8")
+    mac = hmac.new(secret.encode("utf-8"), message, hashlib.sha256)
+    expected = mac.hexdigest()
+    match = False
+    for signature in signatures.get("v1", []):
+        if hmac.compare_digest(signature, expected):
+            match = True
+            break
+    if match:
+        return True
+
+    logger.warning("Tailscale signature verification failed: want=%s got=%s", expected, signatures.get("v1", []))
+    return False
 
 
 def _build_dingtalk_url(webhook_url, signing_secret):
@@ -80,8 +140,15 @@ def _build_message(payload_text):
 
 
 def handler(event, context):
-    body = _get_body(event)
-    headers = _get_headers(event)
+    normalized_event = _normalize_event(event)
+    body = _get_body(normalized_event)
+    headers = _get_headers(normalized_event)
+    try:
+        logger.info("Incoming request event: %s", json.dumps(normalized_event, ensure_ascii=False, default=str))
+        logger.info("Incoming request headers: %s", json.dumps(headers, ensure_ascii=False))
+        logger.info("Incoming request body: %s", body)
+    except Exception:
+        logger.exception("Failed to log incoming request details")
 
     tailscale_secret = os.environ.get("TAILSCALE_WEBHOOK_SECRET", "")
     if not _verify_tailscale_signature(tailscale_secret, body, headers):
