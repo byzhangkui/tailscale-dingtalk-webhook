@@ -57,6 +57,8 @@ def _normalize_event(event):
 
 
 def _parse_tailscale_signature_header(header_value):
+    # 1) Go example: parseSignatureHeader splits the header into timestamp and versioned signatures.
+    # The expected format is: "t=<unix>,v1=<hexsig>[,v1=<hexsig>...]".
     if not header_value:
         return None, None
 
@@ -64,18 +66,22 @@ def _parse_tailscale_signature_header(header_value):
     signatures = {}
     pairs = header_value.split(",")
     for pair in pairs:
-        parts = pair.split("=", 1)
+        # 2) Each pair must be "key=value". Any other shape is invalid.
+        parts = pair.split("=")
         if len(parts) != 2:
             return None, None
         key, value = parts[0].strip(), parts[1].strip()
         if key == "t":
+            # 3) "t" is a UNIX timestamp in seconds.
             try:
                 timestamp = int(value)
             except ValueError:
                 return None, None
         elif key == "v1":
+            # 4) "v1" signatures may appear multiple times; collect all of them.
             signatures.setdefault("v1", []).append(value)
         else:
+            # 5) Unknown keys are ignored, matching the Go implementation.
             continue
 
     if not signatures:
@@ -84,6 +90,8 @@ def _parse_tailscale_signature_header(header_value):
 
 
 def _get_tailscale_signature_header(headers):
+    # Tailscale uses "Tailscale-Webhook-Signature". Some environments may pass it as
+    # lowercased keys; accept both that and the legacy "X-Tailscale-Signature" if present.
     for key in ("tailscale-webhook-signature", "x-tailscale-signature"):
         value = headers.get(key)
         if value:
@@ -96,20 +104,24 @@ def _verify_tailscale_signature(secret, body, headers):
         logger.warning("TAILSCALE_WEBHOOK_SECRET is not set; skipping signature verification")
         return True
 
+    # 1) Parse the signature header to get timestamp and signatures.
     header_value = _get_tailscale_signature_header(headers)
     timestamp, signatures = _parse_tailscale_signature_header(header_value)
     if timestamp is None or not signatures:
         logger.warning("Missing or invalid Tailscale-Webhook-Signature header")
         return False
 
+    # 2) Verify the timestamp is not older than 5 minutes.
     if time.time() - timestamp > 300:
         logger.warning("Tailscale signature timestamp is too old")
         return False
 
+    # 3) Form the expected signature: HMAC-SHA256(secret, "<timestamp>.<body>").
     message = f"{timestamp}.{body}".encode("utf-8")
     mac = hmac.new(secret.encode("utf-8"), message, hashlib.sha256)
     expected = mac.hexdigest()
     match = False
+    # 4) Check all v1 signatures for a constant-time match.
     for signature in signatures.get("v1", []):
         if hmac.compare_digest(signature, expected):
             match = True
