@@ -61,11 +61,12 @@ def _parse_tailscale_signature_header(header_value):
         return None, None
 
     timestamp = None
-    signature = None
-    for pair in header_value.split(","):
+    signatures = {}
+    pairs = header_value.split(",")
+    for pair in pairs:
         parts = pair.split("=", 1)
         if len(parts) != 2:
-            continue
+            return None, None
         key, value = parts[0].strip(), parts[1].strip()
         if key == "t":
             try:
@@ -73,10 +74,13 @@ def _parse_tailscale_signature_header(header_value):
             except ValueError:
                 return None, None
         elif key == "v1":
-            signature = value
+            signatures.setdefault("v1", []).append(value)
         else:
             continue
-    return timestamp, signature
+
+    if not signatures:
+        return None, None
+    return timestamp, signatures
 
 
 def _verify_tailscale_signature(secret, body, headers):
@@ -85,8 +89,8 @@ def _verify_tailscale_signature(secret, body, headers):
         return True
 
     header_value = headers.get("tailscale-webhook-signature", "")
-    timestamp, signature = _parse_tailscale_signature_header(header_value)
-    if not timestamp or not signature:
+    timestamp, signatures = _parse_tailscale_signature_header(header_value)
+    if not timestamp or not signatures:
         logger.warning("Missing or invalid Tailscale-Webhook-Signature header")
         return False
 
@@ -95,11 +99,17 @@ def _verify_tailscale_signature(secret, body, headers):
         return False
 
     message = f"{timestamp}.{body}".encode("utf-8")
-    expected = hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
-    if hmac.compare_digest(signature, expected):
+    mac = hmac.new(secret.encode("utf-8"), message, hashlib.sha256)
+    expected = mac.hexdigest()
+    match = False
+    for signature in signatures.get("v1", []):
+        if hmac.compare_digest(signature, expected):
+            match = True
+            break
+    if match:
         return True
 
-    logger.warning("Tailscale signature verification failed")
+    logger.warning("Tailscale signature verification failed: want=%s got=%s", expected, signatures.get("v1", []))
     return False
 
 
