@@ -115,6 +115,11 @@ def _build_message(payload_text):
 def handler(event, context):
     body = _get_body(event)
     headers = _get_headers(event)
+    try:
+        logger.info("Incoming request headers: %s", json.dumps(headers, ensure_ascii=False))
+        logger.info("Incoming request body: %s", body)
+    except Exception:
+        logger.exception("Failed to log incoming request details")
 
     tailscale_secret = os.environ.get("TAILSCALE_WEBHOOK_SECRET", "")
     if not _verify_tailscale_signature(tailscale_secret, body, headers):
