@@ -38,19 +38,52 @@ def _get_body(event):
     return ""
 
 
+def _parse_tailscale_signature_header(header_value):
+    if not header_value:
+        return None, {}
+
+    timestamp = None
+    signatures = {}
+    for pair in header_value.split(","):
+        parts = pair.split("=", 1)
+        if len(parts) != 2:
+            continue
+        key, value = parts[0].strip(), parts[1].strip()
+        if key == "t":
+            try:
+                timestamp = int(value)
+            except ValueError:
+                return None, {}
+        elif key == "v1":
+            signatures.setdefault("v1", []).append(value)
+        else:
+            continue
+    return timestamp, signatures
+
+
 def _verify_tailscale_signature(secret, body, headers):
     if not secret:
         logger.warning("TAILSCALE_WEBHOOK_SECRET is not set; skipping signature verification")
         return True
-    signature = headers.get("x-tailscale-signature", "")
-    if not signature.startswith("sha256="):
+
+    header_value = headers.get("tailscale-webhook-signature") or headers.get("x-tailscale-signature", "")
+    timestamp, signatures = _parse_tailscale_signature_header(header_value)
+    if not timestamp or not signatures:
         logger.warning("Missing or invalid X-Tailscale-Signature header")
         return False
-    expected = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256)
-    valid = hmac.compare_digest(signature, f"sha256={expected.hexdigest()}")
-    if not valid:
-        logger.warning("Tailscale signature verification failed")
-    return valid
+
+    if time.time() - timestamp > 300:
+        logger.warning("Tailscale signature timestamp is too old")
+        return False
+
+    message = f"{timestamp}.{body}".encode("utf-8")
+    expected = hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+    for signature in signatures.get("v1", []):
+        if hmac.compare_digest(signature, expected):
+            return True
+
+    logger.warning("Tailscale signature verification failed")
+    return False
 
 
 def _build_dingtalk_url(webhook_url, signing_secret):
