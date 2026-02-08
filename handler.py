@@ -83,14 +83,22 @@ def _parse_tailscale_signature_header(header_value):
     return timestamp, signatures
 
 
+def _get_tailscale_signature_header(headers):
+    for key in ("tailscale-webhook-signature", "x-tailscale-signature"):
+        value = headers.get(key)
+        if value:
+            return value
+    return ""
+
+
 def _verify_tailscale_signature(secret, body, headers):
     if not secret:
         logger.warning("TAILSCALE_WEBHOOK_SECRET is not set; skipping signature verification")
         return True
 
-    header_value = headers.get("tailscale-webhook-signature", "")
+    header_value = _get_tailscale_signature_header(headers)
     timestamp, signatures = _parse_tailscale_signature_header(header_value)
-    if not timestamp or not signatures:
+    if timestamp is None or not signatures:
         logger.warning("Missing or invalid Tailscale-Webhook-Signature header")
         return False
 
