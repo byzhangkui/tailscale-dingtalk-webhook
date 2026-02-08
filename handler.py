@@ -2,11 +2,16 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 import urllib.parse
 
 import requests
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 
 def _get_headers(event):
@@ -35,12 +40,17 @@ def _get_body(event):
 
 def _verify_tailscale_signature(secret, body, headers):
     if not secret:
+        logger.warning("TAILSCALE_WEBHOOK_SECRET is not set; skipping signature verification")
         return True
     signature = headers.get("x-tailscale-signature", "")
     if not signature.startswith("sha256="):
+        logger.warning("Missing or invalid X-Tailscale-Signature header")
         return False
     expected = hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256)
-    return hmac.compare_digest(signature, f"sha256={expected.hexdigest()}")
+    valid = hmac.compare_digest(signature, f"sha256={expected.hexdigest()}")
+    if not valid:
+        logger.warning("Tailscale signature verification failed")
+    return valid
 
 
 def _build_dingtalk_url(webhook_url, signing_secret):
@@ -75,6 +85,7 @@ def handler(event, context):
 
     tailscale_secret = os.environ.get("TAILSCALE_WEBHOOK_SECRET", "")
     if not _verify_tailscale_signature(tailscale_secret, body, headers):
+        logger.info("Request rejected due to invalid Tailscale signature")
         return {
             "statusCode": 401,
             "headers": {"Content-Type": "application/json"},
@@ -83,6 +94,7 @@ def handler(event, context):
 
     dingtalk_webhook = os.environ.get("DINGTALK_WEBHOOK_URL")
     if not dingtalk_webhook:
+        logger.error("DINGTALK_WEBHOOK_URL is not configured")
         return {
             "statusCode": 500,
             "headers": {"Content-Type": "application/json"},
@@ -92,12 +104,14 @@ def handler(event, context):
     dingtalk_secret = os.environ.get("DINGTALK_SIGNING_SECRET", "")
     signed_url = _build_dingtalk_url(dingtalk_webhook, dingtalk_secret)
     message = _build_message(body)
+    logger.info("Forwarding event to DingTalk")
 
     response = requests.post(
         signed_url,
         json={"msgtype": "text", "text": {"content": message}},
         timeout=10,
     )
+    logger.info("DingTalk response status: %s", response.status_code)
 
     return {
         "statusCode": response.status_code,
