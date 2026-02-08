@@ -22,10 +22,6 @@ def _get_headers(event):
 
 
 def _get_body(event):
-    if isinstance(event, (bytes, bytearray)):
-        return event.decode("utf-8")
-    if isinstance(event, str):
-        return event
     if isinstance(event, dict):
         body = event.get("body")
         if body is None:
@@ -35,7 +31,29 @@ def _get_body(event):
         if isinstance(body, (bytes, bytearray)):
             return body.decode("utf-8")
         return str(body)
+    if isinstance(event, (bytes, bytearray)):
+        return event.decode("utf-8")
+    if isinstance(event, str):
+        return event
     return ""
+
+
+def _normalize_event(event):
+    if isinstance(event, (bytes, bytearray)):
+        event_text = event.decode("utf-8")
+    elif isinstance(event, str):
+        event_text = event
+    else:
+        event_text = None
+
+    if event_text:
+        try:
+            parsed = json.loads(event_text)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    return event
 
 
 def _parse_tailscale_signature_header(header_value):
@@ -113,9 +131,11 @@ def _build_message(payload_text):
 
 
 def handler(event, context):
-    body = _get_body(event)
-    headers = _get_headers(event)
+    normalized_event = _normalize_event(event)
+    body = _get_body(normalized_event)
+    headers = _get_headers(normalized_event)
     try:
+        logger.info("Incoming request event: %s", json.dumps(normalized_event, ensure_ascii=False, default=str))
         logger.info("Incoming request headers: %s", json.dumps(headers, ensure_ascii=False))
         logger.info("Incoming request body: %s", body)
     except Exception:
