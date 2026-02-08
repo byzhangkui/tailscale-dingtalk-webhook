@@ -58,10 +58,10 @@ def _normalize_event(event):
 
 def _parse_tailscale_signature_header(header_value):
     if not header_value:
-        return None, {}
+        return None, None
 
     timestamp = None
-    signatures = {}
+    signature = None
     for pair in header_value.split(","):
         parts = pair.split("=", 1)
         if len(parts) != 2:
@@ -71,12 +71,12 @@ def _parse_tailscale_signature_header(header_value):
             try:
                 timestamp = int(value)
             except ValueError:
-                return None, {}
+                return None, None
         elif key == "v1":
-            signatures.setdefault("v1", []).append(value)
+            signature = value
         else:
             continue
-    return timestamp, signatures
+    return timestamp, signature
 
 
 def _verify_tailscale_signature(secret, body, headers):
@@ -84,10 +84,10 @@ def _verify_tailscale_signature(secret, body, headers):
         logger.warning("TAILSCALE_WEBHOOK_SECRET is not set; skipping signature verification")
         return True
 
-    header_value = headers.get("tailscale-webhook-signature") or headers.get("x-tailscale-signature", "")
-    timestamp, signatures = _parse_tailscale_signature_header(header_value)
-    if not timestamp or not signatures:
-        logger.warning("Missing or invalid X-Tailscale-Signature header")
+    header_value = headers.get("tailscale-webhook-signature", "")
+    timestamp, signature = _parse_tailscale_signature_header(header_value)
+    if not timestamp or not signature:
+        logger.warning("Missing or invalid Tailscale-Webhook-Signature header")
         return False
 
     if time.time() - timestamp > 300:
@@ -96,9 +96,8 @@ def _verify_tailscale_signature(secret, body, headers):
 
     message = f"{timestamp}.{body}".encode("utf-8")
     expected = hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
-    for signature in signatures.get("v1", []):
-        if hmac.compare_digest(signature, expected):
-            return True
+    if hmac.compare_digest(signature, expected):
+        return True
 
     logger.warning("Tailscale signature verification failed")
     return False
